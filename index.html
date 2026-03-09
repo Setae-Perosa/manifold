@@ -1,0 +1,1602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Manifold" />
+  <meta name="theme-color" content="#2a1a08" />
+  <title>The Manifold</title>
+
+  <!-- PWA icons (inline SVG as data URI for self-contained file) -->
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%232a1a08'/%3E%3Ctext y='72' x='50' text-anchor='middle' font-size='64' fill='%23d4a840'%3E⚙%3C/text%3E%3C/svg%3E" />
+
+  <!-- React + Babel from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #2a1a08; }
+    /* Safe area for iPhone notch/home bar */
+    body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+const LIFTS = ["High Bar Squat", "Incline Bench", "Standing OHP", "Deficit Deadlift"];
+const LIFT_SHORT = ["Squat", "Bench", "OHP", "Deadlift"];
+
+function today() { return new Date().toLocaleDateString("en-CA"); }
+
+function soberDays() {
+  const start = new Date("2026-02-14T00:00:00");
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  return Math.floor((now - start) / 86400000);
+}
+
+function mounjaroWeek() {
+  const start = new Date("2026-03-03T00:00:00");
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const days = Math.floor((now - start) / 86400000);
+  if (days < 0) return 1;
+  return Math.floor(days / 7) + 1;
+}
+
+// ── Storage: window.storage with localStorage fallback ─────────
+async function storageGet(key) {
+  // Try window.storage first
+  try {
+    if (window.storage?.get) {
+      const r = await window.storage.get(key);
+      if (r?.value != null) return JSON.parse(r.value);
+    }
+  } catch {}
+  // Fallback: localStorage
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : null;
+  } catch { return null; }
+}
+
+async function storageSet(key, value) {
+  const str = JSON.stringify(value);
+  // Try window.storage first
+  try {
+    if (window.storage?.set) {
+      const r = await window.storage.set(key, str);
+      if (r) return true;
+    }
+  } catch {}
+  // Fallback: localStorage
+  try {
+    localStorage.setItem(key, str);
+    return true;
+  } catch (e) {
+    console.error("storageSet failed:", key, e);
+    return false;
+  }
+}
+
+async function storageCheck() {
+  try {
+    const ok = await storageSet("manifold:healthcheck", { ok: true });
+    if (!ok) return false;
+    const r = await storageGet("manifold:healthcheck");
+    return r?.ok === true;
+  } catch { return false; }
+}
+
+// ── Main App ─────────────────────────────────────────────────────
+function App() {
+  const [tab, setTab] = useState("dashboard");
+  const [loaded, setLoaded] = useState(false);
+  const [storageOk, setStorageOk] = useState(true);
+  const [showExport, setShowExport] = useState(false);
+  const [exportText, setExportText] = useState("");
+
+  // Data state
+  const [weights, setWeights] = useState([]);
+  const [diet, setDiet] = useState({});
+  const [workouts, setWorkouts] = useState([]);
+
+  // Form state
+  const [wInput, setWInput] = useState("");
+  const [wDate, setWDate] = useState(today());
+  const [dietForm, setDietForm] = useState({ calories: "", carbs: "", protein: "", water: "", notes: "" });
+  const [dietDate, setDietDate] = useState(today());
+  const [wkLift, setWkLift] = useState(0);
+  const [wkSets, setWkSets] = useState([{ weight: "", reps: "" }]);
+  const [wkNotes, setWkNotes] = useState("");
+  const [wkDate, setWkDate] = useState(today());
+  const [saveFlash, setSaveFlash] = useState("");
+
+  // Food log state
+  const [foodLog, setFoodLog] = useState([]);
+  const [foodStep, setFoodStep] = useState("name"); // "name" | "macros"
+  const [foodName, setFoodName] = useState("");
+  const [foodAmt, setFoodAmt] = useState("");
+  const [foodUnit, setFoodUnit] = useState("");
+  const [foodMacros, setFoodMacros] = useState({ carbs: "", protein: "", fat: "", fibre: "" });
+  const [foodTime, setFoodTime] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingAmt, setEditingAmt] = useState("");
+  const [editingUnit, setEditingUnit] = useState("");
+  const [editingTime, setEditingTime] = useState("");
+  const [foodDb, setFoodDb] = useState([]);       // persistent food database
+  const [foodDbSearch, setFoodDbSearch] = useState("");
+  const [showFoodDb, setShowFoodDb] = useState(false);
+
+  // ── Load all data on mount ──
+  useEffect(() => {
+    (async () => {
+      const [w, d, wk, fl, fdb] = await Promise.all([
+        storageGet("manifold:weights"),
+        storageGet("manifold:diet"),
+        storageGet("manifold:workouts"),
+        storageGet("manifold:foodlog"),
+        storageGet("manifold:fooddb"),
+      ]);
+      if (w) setWeights(w);
+      else setWeights([
+        { date: "2026-02-28", weight: 242 },
+        { date: "2026-03-07", weight: 236.5 },
+      ]);
+      if (d) setDiet(d);
+      if (wk) setWorkouts(wk);
+      if (fl) setFoodLog(fl);
+      if (fdb) setFoodDb(fdb);
+      const ok = await storageCheck();
+      setStorageOk(ok);
+      setLoaded(true);
+    })();
+  }, []);
+
+  const flash = (msg) => {
+    setSaveFlash(msg);
+    setTimeout(() => setSaveFlash(""), 1800);
+  };
+
+  // ── Save + state helpers ──
+  const saveWeight = async () => {
+    if (!wInput) return;
+    const updated = [...weights.filter(w => w.date !== wDate), { date: wDate, weight: parseFloat(wInput) }]
+      .sort((a, b) => a.date.localeCompare(b.date));
+    setWeights(updated);
+    await storageSet("manifold:weights", updated);
+    setWInput("");
+    flash("Weight logged ✓");
+  };
+
+  const saveDiet = async () => {
+    const updated = { ...diet, [dietDate]: { ...dietForm } };
+    setDiet(updated);
+    await storageSet("manifold:diet", updated);
+    setDietForm({ calories: "", carbs: "", protein: "", water: "", notes: "" });
+    flash("Day recorded ✓");
+  };
+
+  const saveWorkout = async () => {
+    const validSets = wkSets.filter(s => s.weight && s.reps);
+    if (!validSets.length) return;
+    const updated = [...workouts, { date: wkDate, lift: LIFTS[wkLift], sets: validSets, notes: wkNotes }];
+    setWorkouts(updated);
+    await storageSet("manifold:workouts", updated);
+    setWkSets([{ weight: "", reps: "" }]);
+    setWkNotes("");
+    flash("Session recorded ✓");
+  };
+
+  const deleteWeight = async (date) => {
+    const updated = weights.filter(w => w.date !== date);
+    setWeights(updated);
+    await storageSet("manifold:weights", updated);
+    flash("Entry removed ✓");
+  };
+
+  const deleteWorkout = async (index) => {
+    const reversed = [...workouts].reverse();
+    const original = workouts.indexOf(reversed[index]);
+    const updated = workouts.filter((_, i) => i !== original);
+    setWorkouts(updated);
+    await storageSet("manifold:workouts", updated);
+    flash("Session removed ✓");
+  };
+
+  const deleteDiet = async (date) => {
+    const updated = { ...diet };
+    delete updated[date];
+    setDiet(updated);
+    await storageSet("manifold:diet", updated);
+    flash("Day removed ✓");
+  };
+
+  // ── Food Log ──
+  const nowTime = () => new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+
+  const startFoodEntry = () => {
+    if (!foodName.trim()) return;
+    setFoodTime(nowTime());
+    setFoodMacros({ carbs: "", protein: "", fat: "", fibre: "" });
+    setFoodStep("macros");
+  };
+
+  const calcCals = (m, mult = 1) =>
+    Math.round(((parseFloat(m.carbs)||0)*4 + (parseFloat(m.protein)||0)*4 + (parseFloat(m.fat)||0)*9) * mult);
+
+  const scaleMacro = (val, mult) => {
+    const n = parseFloat(val);
+    if (!n) return "";
+    return String(Math.round(n * mult * 10) / 10);
+  };
+
+  const recalcTotals = async (log, currentDiet) => {
+    const d = currentDiet ?? diet;
+    const todayEntries = log.filter(e => e.date === today());
+    const totals = todayEntries.reduce((acc, e) => ({
+      calories: acc.calories + (e.calories || 0),
+      protein:  acc.protein  + (parseFloat(e.protein)  || 0),
+      carbs:    acc.carbs    + (parseFloat(e.carbs)    || 0),
+    }), { calories: 0, protein: 0, carbs: 0 });
+    const existing = d[today()] || {};
+    const dietUpdated = {
+      ...d,
+      [today()]: {
+        ...existing,
+        calories: String(Math.round(totals.calories)),
+        protein:  String(Math.round(totals.protein)),
+        carbs:    String(Math.round(totals.carbs)),
+      }
+    };
+    setDiet(dietUpdated);
+    await storageSet("manifold:diet", dietUpdated);
+  };
+
+  const saveFoodEntry = async () => {
+    const mult = parseFloat(foodAmt) || 1;
+    const scaled = {
+      carbs:   scaleMacro(foodMacros.carbs,   mult),
+      protein: scaleMacro(foodMacros.protein, mult),
+      fat:     scaleMacro(foodMacros.fat,     mult),
+      fibre:   scaleMacro(foodMacros.fibre,   mult),
+    };
+    const cals = calcCals(foodMacros, mult);
+    const entry = {
+      id: Date.now(),
+      date: today(),
+      time: foodTime,
+      name: foodName.trim(),
+      amount: parseFloat(foodAmt) || 1,
+      unit: foodUnit.trim() || "serving",
+      carbs: scaled.carbs,
+      protein: scaled.protein,
+      fat: scaled.fat,
+      fibre: scaled.fibre,
+      calories: cals,
+    };
+    const updatedLog = [...foodLog, entry];
+    setFoodLog(updatedLog);
+    await storageSet("manifold:foodlog", updatedLog);
+    await recalcTotals(updatedLog);
+
+    // DB stores per-unit macros so amount can scale on reuse
+    const dbKey = foodName.trim().toLowerCase();
+    const dbEntry = {
+      name: foodName.trim(),
+      unit: foodUnit.trim() || "serving",
+      carbsPerUnit:   foodMacros.carbs,
+      proteinPerUnit: foodMacros.protein,
+      fatPerUnit:     foodMacros.fat,
+      fibrePerUnit:   foodMacros.fibre,
+      calsPerUnit:    calcCals(foodMacros, 1),
+      lastUsed: today(),
+    };
+    const existingIdx = foodDb.findIndex(f => f.name.toLowerCase() === dbKey);
+    let updatedDb;
+    if (existingIdx >= 0) {
+      updatedDb = foodDb.map((f, i) => i === existingIdx
+        ? { ...f, ...dbEntry, useCount: (f.useCount || 1) + 1 }
+        : f
+      );
+    } else {
+      updatedDb = [...foodDb, { ...dbEntry, useCount: 1 }];
+    }
+    updatedDb.sort((a, b) => (b.lastUsed || "").localeCompare(a.lastUsed || "") || (b.useCount || 0) - (a.useCount || 0));
+    setFoodDb(updatedDb);
+    const saved = await storageSet("manifold:fooddb", updatedDb);
+
+    setFoodStep("name");
+    setFoodName("");
+    setFoodAmt("");
+    setFoodUnit("");
+    setFoodMacros({ carbs: "", protein: "", fat: "", fibre: "" });
+    flash(saved ? "Food logged ✓" : "⚠ Logged but save failed");
+    if (!saved) setStorageOk(false);
+  };
+
+  const startEditEntry = (entry) => {
+    setEditingId(entry.id);
+    setEditingName(entry.name);
+    setEditingAmt(String(entry.amount || 1));
+    setEditingUnit(entry.unit || "serving");
+    setEditingTime(entry.time);
+    // Store per-unit macros for re-scaling: reverse-divide by original amount
+    const origMult = parseFloat(entry.amount) || 1;
+    setFoodMacros({
+      carbs:   entry.carbs   ? String(Math.round((parseFloat(entry.carbs)   / origMult) * 10) / 10) : "",
+      protein: entry.protein ? String(Math.round((parseFloat(entry.protein) / origMult) * 10) / 10) : "",
+      fat:     entry.fat     ? String(Math.round((parseFloat(entry.fat)     / origMult) * 10) / 10) : "",
+      fibre:   entry.fibre   ? String(Math.round((parseFloat(entry.fibre)   / origMult) * 10) / 10) : "",
+    });
+  };
+
+  const saveEditEntry = async () => {
+    const mult = parseFloat(editingAmt) || 1;
+    const scaled = {
+      carbs:   scaleMacro(foodMacros.carbs,   mult),
+      protein: scaleMacro(foodMacros.protein, mult),
+      fat:     scaleMacro(foodMacros.fat,     mult),
+      fibre:   scaleMacro(foodMacros.fibre,   mult),
+    };
+    const updated = foodLog.map(e =>
+      e.id === editingId
+        ? { ...e, name: editingName || e.name, amount: parseFloat(editingAmt) || 1, unit: editingUnit || e.unit || "serving", time: editingTime || e.time, ...scaled, calories: calcCals(foodMacros, mult) }
+        : e
+    );
+    setFoodLog(updated);
+    await storageSet("manifold:foodlog", updated);
+    await recalcTotals(updated);
+    setEditingId(null);
+    setFoodMacros({ carbs: "", protein: "", fat: "", fibre: "" });
+    flash("Entry updated ✓");
+  };
+
+  const deleteFoodEntry = async (id) => {
+    const updated = foodLog.filter(e => e.id !== id);
+    setFoodLog(updated);
+    await storageSet("manifold:foodlog", updated);
+    await recalcTotals(updated);
+    if (editingId === id) setEditingId(null);
+    flash("Entry removed ✓");
+  };
+
+  const deleteFoodDbEntry = async (name) => {
+    const updated = foodDb.filter(f => f.name.toLowerCase() !== name.toLowerCase());
+    setFoodDb(updated);
+    await storageSet("manifold:fooddb", updated);
+    flash("Removed from database ✓");
+  };
+
+  const addWater = async (ml) => {
+    const existing = diet[today()] || {};
+    const current = parseFloat(existing.water) || 0;
+    const updated = { ...diet, [today()]: { ...existing, water: String(Math.round(current + ml)) } };
+    setDiet(updated);
+    await storageSet("manifold:diet", updated);
+    flash(`+${ml} ml ✓`);
+  };
+
+  const resetWater = async () => {
+    const existing = diet[today()] || {};
+    const updated = { ...diet, [today()]: { ...existing, water: "0" } };
+    setDiet(updated);
+    await storageSet("manifold:diet", updated);
+    flash("Water reset ✓");
+  };
+
+  const loadFromDb = (dbEntry) => {
+    setFoodName(dbEntry.name);
+    setFoodAmt("1");
+    setFoodUnit(dbEntry.unit || "serving");
+    setFoodMacros({
+      carbs:   dbEntry.carbsPerUnit   || dbEntry.carbs   || "",
+      protein: dbEntry.proteinPerUnit || dbEntry.protein || "",
+      fat:     dbEntry.fatPerUnit     || dbEntry.fat     || "",
+      fibre:   dbEntry.fibrePerUnit   || dbEntry.fibre   || "",
+    });
+    setFoodTime(nowTime());
+    setShowFoodDb(false);
+    setFoodDbSearch("");
+    setFoodStep("macros");
+  };
+
+  const todayFoodLog = foodLog.filter(e => e.date === today());
+  const todayFoodTotals = todayFoodLog.reduce((acc, e) => ({
+    calories: acc.calories + (e.calories || 0),
+    protein:  acc.protein  + (parseFloat(e.protein)  || 0),
+    carbs:    acc.carbs    + (parseFloat(e.carbs)    || 0),
+    fat:      acc.fat      + (parseFloat(e.fat)      || 0),
+    fibre:    acc.fibre    + (parseFloat(e.fibre)    || 0),
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 });
+
+  const CAL_TARGET = 2000;
+  const filteredDb = foodDb.filter(f =>
+    !foodDbSearch || f.name.toLowerCase().includes(foodDbSearch.toLowerCase())
+  );
+    const latest = weights[weights.length - 1];
+  const prevW = weights.length > 1 ? weights[weights.length - 2] : null;
+  const delta = latest && prevW ? (latest.weight - prevW.weight).toFixed(1) : null;
+  const todayDiet = diet[today()];
+  const recentWorkouts = [...workouts].reverse().slice(0, 6);
+
+  const generateExport = () => {
+    const lines = [];
+    const d = new Date();
+    lines.push("═══════════════════════════════════════");
+    lines.push("  THE MANIFOLD — HEALTH EXPORT");
+    lines.push(`  Generated: ${d.toLocaleDateString("en-CA")} at ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`);
+    lines.push("═══════════════════════════════════════");
+    lines.push("");
+
+    // ── Profile context ──
+    lines.push("── PROFILE ─────────────────────────────");
+    lines.push("Name: James  |  DOB: Feb 5 1974  |  6'2\" male");
+    lines.push(`Sobriety: ${soberDays()} days (since Feb 14 2026)`);
+    lines.push(`Mounjaro: Week ${mounjaroWeek()} (2.5mg, started Mar 3 2026)`);
+    lines.push("A1C: 6.6 (as of Feb 27 2026)");
+    lines.push("Target: A1C reduction via diet + medication");
+    lines.push("");
+
+    // ── Weight ──
+    lines.push("── WEIGHT ──────────────────────────────");
+    if (weights.length === 0) {
+      lines.push("No weight entries logged.");
+    } else {
+      const sorted = [...weights].sort((a, b) => a.date.localeCompare(b.date));
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const change = (last.weight - first.weight).toFixed(1);
+      lines.push(`Current: ${last.weight} lbs (${last.date})`);
+      lines.push(`Starting: ${first.weight} lbs (${first.date})`);
+      lines.push(`Total change: ${change > 0 ? "+" : ""}${change} lbs`);
+      lines.push("");
+      lines.push("Full history:");
+      sorted.forEach(w => lines.push(`  ${w.date}: ${w.weight} lbs`));
+    }
+    lines.push("");
+
+    // ── Nutrition (last 14 days) ──
+    lines.push("── NUTRITION (last 14 days) ────────────");
+    const dietDates = Object.keys(diet).sort().reverse().slice(0, 14);
+    if (dietDates.length === 0) {
+      lines.push("No nutrition entries logged.");
+    } else {
+      dietDates.forEach(date => {
+        const d = diet[date];
+        const parts = [];
+        if (d.calories) parts.push(`${d.calories} kcal`);
+        if (d.protein)  parts.push(`${d.protein}g protein`);
+        if (d.carbs)    parts.push(`${d.carbs}g carbs`);
+        if (d.water)    parts.push(`${d.water} ml water`);
+        lines.push(`  ${date}: ${parts.join(" · ") || "logged"}`);
+        if (d.notes) lines.push(`    Notes: ${d.notes}`);
+      });
+    }
+    lines.push("");
+
+    // ── Food log (last 7 days) ──
+    lines.push("── FOOD LOG (last 7 days) ──────────────");
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
+    const recentFood = foodLog
+      .filter(e => new Date(e.date) >= cutoff)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.time?.localeCompare(a.time));
+    if (recentFood.length === 0) {
+      lines.push("No food entries in last 7 days.");
+    } else {
+      let lastDate = "";
+      recentFood.forEach(e => {
+        if (e.date !== lastDate) {
+          lines.push(`  ${e.date}:`);
+          lastDate = e.date;
+        }
+        const macros = [];
+        if (e.calories) macros.push(`${e.calories} kcal`);
+        if (e.protein)  macros.push(`${e.protein}g P`);
+        if (e.carbs)    macros.push(`${e.carbs}g C`);
+        if (e.fat)      macros.push(`${e.fat}g F`);
+        lines.push(`    [${e.time || "—"}] ${e.amount} ${e.unit || ""} ${e.name} — ${macros.join(", ") || "no macros"}`);
+      });
+    }
+    lines.push("");
+
+    // ── Food database ──
+    lines.push("── FOOD DATABASE ───────────────────────");
+    if (foodDb.length === 0) {
+      lines.push("No foods in database yet.");
+    } else {
+      foodDb.forEach(f => {
+        const cals = f.calsPerUnit || f.calories || 0;
+        const prot = f.proteinPerUnit || f.protein || 0;
+        const carb = f.carbsPerUnit  || f.carbs  || 0;
+        const fat  = f.fatPerUnit    || f.fat    || 0;
+        lines.push(`  ${f.name} (per ${f.unit || "serving"}): ${cals} kcal · ${prot}g P · ${carb}g C · ${fat}g F  [used ×${f.useCount || 1}]`);
+      });
+    }
+    lines.push("");
+
+    // ── Training ──
+    lines.push("── TRAINING ────────────────────────────");
+    if (workouts.length === 0) {
+      lines.push("No training sessions logged.");
+    } else {
+      const recent = [...workouts].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+      recent.forEach(w => {
+        lines.push(`  ${w.date} — ${w.lift}`);
+        w.sets?.forEach((s, i) => lines.push(`    Set ${i + 1}: ${s.weight} lbs × ${s.reps} reps`));
+        if (w.notes) lines.push(`    Notes: ${w.notes}`);
+      });
+    }
+    lines.push("");
+    lines.push("═══════════════════════════════════════");
+    lines.push("  Paste this into your Claude conversation");
+    lines.push("  for analysis and insights.");
+    lines.push("═══════════════════════════════════════");
+
+    const text = lines.join("\n");
+    setExportText(text);
+    setShowExport(true);
+  };
+
+  const tabs = [
+    { id: "dashboard", icon: "⚙", label: "Log" },
+    { id: "weight", icon: "⚖", label: "Weight" },
+    { id: "diet", icon: "⚗", label: "Diet" },
+    { id: "food", icon: "✦", label: "Food" },
+    { id: "training", icon: "⚒", label: "Train" },
+  ];
+
+  if (!loaded) return (
+    <div style={{ minHeight: "100vh", background: "#e8d9b5", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ fontFamily: "'Cinzel', serif", fontSize: 22, color: "#a07840", letterSpacing: 4 }}>LOADING…</div>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&display=swap');`}</style>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#e8d9b5", color: "#1a1008", fontFamily: "'IM Fell English', serif", paddingBottom: 96 }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=Cinzel:wght@600;800&family=Special+Elite&display=swap');
+
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { margin: 0; background: #e8d9b5; }
+
+        .parchment-bg {
+          background-color: #e8d9b5;
+          background-image: repeating-linear-gradient(
+            0deg, transparent, transparent 28px,
+            rgba(160,120,64,0.06) 28px, rgba(160,120,64,0.06) 29px
+          );
+        }
+
+        input, textarea, select {
+          background: #f5eed8; border: 2px solid #a07840; color: #1a1008;
+          font-family: 'Special Elite', monospace; font-size: 18px;
+          padding: 14px 16px; outline: none; width: 100%; border-radius: 2px;
+          -webkit-appearance: none; appearance: none;
+          box-shadow: inset 0 1px 3px rgba(100,60,20,0.15);
+        }
+        input::placeholder, textarea::placeholder { color: #b09060; }
+        input:focus, textarea:focus, select:focus {
+          border-color: #7a4a28; background: #fdf8ec;
+          box-shadow: inset 0 1px 3px rgba(100,60,20,0.2), 0 0 0 3px rgba(122,74,40,0.12);
+        }
+        textarea { resize: vertical; min-height: 80px; }
+
+        .big-btn {
+          background: linear-gradient(180deg, #8a5c2a 0%, #6a3e18 100%);
+          border: 2px solid #4a2a0a; border-bottom-width: 4px; color: #f5eed8;
+          font-family: 'Cinzel', serif; font-size: 18px; font-weight: 800;
+          letter-spacing: 3px; padding: 18px; width: 100%; border-radius: 2px;
+          cursor: pointer; margin-top: 8px;
+          text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+          box-shadow: 0 4px 8px rgba(80,40,10,0.3);
+        }
+        .big-btn:active {
+          background: linear-gradient(180deg, #7a4c1a 0%, #5a2e08 100%);
+          border-bottom-width: 2px; transform: translateY(2px);
+          box-shadow: 0 2px 4px rgba(80,40,10,0.3);
+        }
+
+        .ghost-btn {
+          background: transparent; border: 2px solid #a07840; color: #7a4a28;
+          font-family: 'Cinzel', serif; font-size: 16px; font-weight: 600;
+          letter-spacing: 2px; padding: 14px 20px; border-radius: 2px; cursor: pointer;
+        }
+        .ghost-btn:active { background: rgba(160,120,64,0.15); border-color: #7a4a28; }
+
+        .del-btn {
+          background: transparent; border: 1px solid #8a3030; color: #8a3030;
+          font-family: 'Special Elite', monospace; font-size: 13px;
+          padding: 4px 10px; border-radius: 2px; cursor: pointer; line-height: 1;
+        }
+        .del-btn:active { background: rgba(138,48,48,0.15); }
+
+        .card {
+          background: #dfd0a8; border: 1px solid #b09060; border-radius: 2px;
+          padding: 20px; margin-bottom: 14px;
+          box-shadow: 2px 2px 8px rgba(100,60,20,0.15), inset 0 0 0 1px rgba(255,240,200,0.3);
+          position: relative;
+        }
+        .card::before, .card::after { content: '◈'; position: absolute; font-size: 10px; color: #a07840; opacity: 0.6; }
+        .card::before { top: 6px; left: 8px; }
+        .card::after { top: 6px; right: 8px; }
+
+        .lbl {
+          font-family: 'Cinzel', serif; font-size: 11px; font-weight: 600;
+          letter-spacing: 2.5px; color: #7a5030; text-transform: uppercase;
+          margin-bottom: 6px; display: block;
+        }
+
+        .huge { font-family: 'Cinzel', serif; font-size: 68px; line-height: 1; color: #1a1008; font-weight: 800; }
+        .big  { font-family: 'Cinzel', serif; font-size: 44px; line-height: 1; color: #1a1008; font-weight: 800; }
+        .med  { font-family: 'Cinzel', serif; font-size: 30px; line-height: 1; color: #1a1008; font-weight: 600; }
+
+        .brass  { color: #a07840; }
+        .copper { color: #7a4a28; }
+        .green  { color: #2a6040; }
+        .red    { color: #8a2020; }
+
+        .section-head {
+          font-family: 'Cinzel', serif; font-size: 26px; font-weight: 800;
+          letter-spacing: 4px; color: #4a2a0a;
+          border-bottom: 2px solid #a07840; padding-bottom: 10px; margin-bottom: 18px;
+          text-transform: uppercase;
+        }
+        .section-head::after { content: ' ⚙'; font-size: 18px; color: #a07840; opacity: 0.7; }
+
+        .row { display: flex; justify-content: space-between; align-items: center; }
+        .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .metric-block {
+          background: #cfc098; border: 1px solid #a07840; border-radius: 2px;
+          padding: 16px 14px; text-align: center;
+          box-shadow: inset 0 0 0 1px rgba(255,240,200,0.25);
+        }
+
+        .workout-entry { padding: 14px 0; border-bottom: 1px dashed #b09060; }
+        .workout-entry:last-child { border-bottom: none; }
+        .lift-name { font-family: 'Cinzel', serif; font-size: 20px; font-weight: 800; letter-spacing: 1px; color: #4a2a0a; }
+
+        .set-row {
+          display: grid; grid-template-columns: 1fr 1fr 52px;
+          gap: 10px; align-items: flex-end; margin-bottom: 10px;
+        }
+
+        .rm-btn {
+          background: #cfc098; border: 2px solid #a07840; color: #7a4a28;
+          font-size: 22px; height: 52px; width: 52px; border-radius: 2px;
+          display: flex; align-items: center; justify-content: center;
+          cursor: pointer; font-family: serif; padding: 0;
+        }
+        .rm-btn:active { background: #b09060; border-color: #7a4a28; }
+
+        .lift-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
+        .lift-choice {
+          background: #cfc098; border: 2px solid #b09060; color: #6a4a28;
+          font-family: 'Cinzel', serif; font-size: 16px; font-weight: 600;
+          letter-spacing: 1px; padding: 18px 10px; border-radius: 2px;
+          cursor: pointer; text-align: center;
+        }
+        .lift-choice.selected {
+          border-color: #6a3e18; border-width: 3px; color: #3a1a08;
+          background: #c8b480; box-shadow: inset 0 1px 3px rgba(100,60,20,0.2);
+        }
+        .lift-choice:active { background: #b09060; }
+
+        .sober-bar {
+          background: linear-gradient(135deg, #2a4a2a, #1a3a1a);
+          border: 2px solid #4a7a4a; border-radius: 2px;
+          padding: 16px 20px; display: flex; justify-content: space-between;
+          align-items: center; margin-bottom: 14px;
+          box-shadow: 2px 2px 8px rgba(20,60,20,0.25);
+        }
+
+        .bottom-nav {
+          position: fixed; bottom: 0; left: 0; right: 0;
+          background: #2a1a08; border-top: 3px solid #a07840;
+          display: flex; padding: 10px 0 20px; z-index: 100;
+          box-shadow: 0 -3px 12px rgba(80,40,10,0.4);
+        }
+        .nav-item {
+          flex: 1; display: flex; flex-direction: column; align-items: center;
+          gap: 4px; background: none; border: none; cursor: pointer; padding: 8px 0; min-height: 48px;
+        }
+        .nav-icon { font-size: 24px; line-height: 1; }
+        .nav-label { font-family: 'Cinzel', serif; font-size: 9px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
+        .nav-item.active .nav-icon  { color: #d4a840; }
+        .nav-item.active .nav-label { color: #d4a840; }
+        .nav-item:not(.active) .nav-icon  { color: #6a5040; }
+        .nav-item:not(.active) .nav-label { color: #6a5040; }
+
+        .field-group { margin-bottom: 16px; }
+
+        .sparkline { display: flex; align-items: flex-end; gap: 6px; height: 70px; margin-top: 12px; }
+        .spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .spark-bar { width: 100%; background: linear-gradient(180deg, #a07840, #7a5820); border-radius: 1px 1px 0 0; min-height: 4px; }
+        .spark-lbl { font-size: 10px; color: #9a7840; font-family: 'Special Elite', monospace; }
+        .spark-val { font-size: 11px; color: #5a3a18; font-family: 'Special Elite', monospace; }
+
+        .content { padding: 16px; max-width: 480px; margin: 0 auto; }
+
+        .page-header {
+          background: linear-gradient(180deg, #2a1a08 0%, #3a2510 100%);
+          border-bottom: 3px solid #a07840; padding: 18px 16px 14px;
+          display: flex; justify-content: space-between; align-items: flex-end;
+          box-shadow: 0 3px 10px rgba(80,40,10,0.35);
+        }
+        .header-name {
+          font-family: 'Cinzel', serif; font-size: 28px; font-weight: 800;
+          letter-spacing: 6px; color: #d4a840; text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .header-sub { font-family: 'Special Elite', monospace; font-size: 12px; color: #9a7840; text-align: right; line-height: 1.8; }
+
+        .empty {
+          text-align: center; color: #a09060; font-size: 14px; letter-spacing: 1px;
+          padding: 28px 0; font-style: italic; font-family: 'IM Fell English', serif;
+        }
+
+        .history-row {
+          display: flex; justify-content: space-between; align-items: center;
+          padding: 16px 0; border-bottom: 1px dashed #b09060;
+        }
+        .history-row:last-child { border-bottom: none; }
+
+        .food-input-row {
+          display: grid; grid-template-columns: 1fr 56px; gap: 10px; align-items: flex-end;
+        }
+        .lookup-btn {
+          background: linear-gradient(180deg, #8a5c2a 0%, #6a3e18 100%);
+          border: 2px solid #4a2a0a; border-bottom-width: 4px; color: #f5eed8;
+          font-size: 26px; height: 56px; width: 56px; border-radius: 2px;
+          display: flex; align-items: center; justify-content: center;
+          cursor: pointer; padding: 0; box-shadow: 0 4px 8px rgba(80,40,10,0.3);
+        }
+        .lookup-btn:active { border-bottom-width: 2px; transform: translateY(2px); }
+        .lookup-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .food-item-row {
+          display: grid; grid-template-columns: 1fr auto;
+          gap: 10px; align-items: start;
+          padding: 14px 0; border-bottom: 1px dashed #b09060;
+        }
+        .food-item-row:last-child { border-bottom: none; }
+
+        .macro-pills {
+          display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;
+        }
+        .macro-pill {
+          background: #cfc098; border: 1px solid #a07840; border-radius: 2px;
+          padding: 3px 8px; font-family: 'Special Elite', monospace; font-size: 13px; color: #4a2a0a;
+        }
+
+        .totals-bar {
+          background: linear-gradient(135deg, #2a1a08, #3a2510);
+          border: 2px solid #a07840; border-radius: 2px;
+          padding: 16px 18px; margin: 14px 0;
+          box-shadow: 2px 2px 8px rgba(80,40,10,0.25);
+        }
+
+        .spin {
+          display: inline-block;
+          animation: spin 1s linear infinite;
+        }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+        .food-error {
+          background: rgba(138,48,48,0.12); border: 1px solid #8a3030;
+          border-radius: 2px; padding: 10px 14px; margin-top: 10px;
+          font-family: 'IM Fell English', serif; font-style: italic;
+          font-size: 14px; color: #8a3030;
+        }
+
+        .flash-toast {
+          position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+          background: #2a4a2a; border: 2px solid #4a7a4a; color: #7abf7a;
+          font-family: 'Cinzel', serif; font-size: 14px; letter-spacing: 2px;
+          padding: 12px 28px; border-radius: 2px; z-index: 200;
+          box-shadow: 0 4px 16px rgba(20,60,20,0.4);
+          pointer-events: none;
+          animation: fadeInOut 1.8s ease forwards;
+        }
+        @keyframes fadeInOut {
+          0%   { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+          15%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+          75%  { opacity: 1; }
+          100% { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+        }
+      `}</style>
+
+      {/* TOAST */}
+      {saveFlash && <div className="flash-toast">{saveFlash}</div>}
+      {!storageOk && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, zIndex: 200,
+          background: "#8a1a1a", color: "#ffd0d0",
+          fontFamily: "'Cinzel', serif", fontSize: 12, letterSpacing: 1,
+          padding: "10px 16px", textAlign: "center",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.4)"
+        }}>
+          ⚠ STORAGE UNAVAILABLE — data will not persist this session
+        </div>
+      )}
+
+      {/* HEADER */}
+      <div className="page-header">
+        <div>
+          <div className="header-name">THE MANIFOLD</div>
+          <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 11, color: "#6a5030", letterSpacing: 3 }}>
+            JAMES · {new Date().getFullYear()}
+          </div>
+        </div>
+        <div className="header-sub">
+          <span>A1C 6.6</span><br />
+          <span style={{ color: "#d4a840" }}>MOUNJARO WK {mounjaroWeek()}</span>
+        </div>
+      </div>
+
+      <div className="content parchment-bg">
+
+        {/* SOBRIETY STRIP */}
+        <div className="sober-bar">
+          <div>
+            <span style={{ fontFamily: "'Cinzel', serif", fontSize: 11, letterSpacing: 2, color: "#7abf7a", display: "block", marginBottom: 4 }}>
+              ⚗ SOBRIETY
+            </span>
+            <div style={{ fontFamily: "'Cinzel', serif", fontSize: 48, lineHeight: 1, color: "#7abf7a", fontWeight: 800 }}>
+              {soberDays()} <span style={{ fontSize: 22, color: "#4a9a4a" }}>DAYS</span>
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 12, color: "#3a6a3a", letterSpacing: 1 }}>SINCE FEB 14</div>
+            <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 11, color: "#2a4a2a", marginTop: 4 }}>SUPPORT ✓</div>
+          </div>
+        </div>
+
+        {/* ── DASHBOARD ── */}
+        {tab === "dashboard" && (
+          <>
+            <div className="section-head">This Week</div>
+
+            <div className="card">
+              <span className="lbl">Current Weight</span>
+              {latest ? (
+                <>
+                  <div className="huge">{latest.weight} <span style={{ fontSize: 28, color: "#9a7840" }}>lbs</span></div>
+                  {delta !== null && (
+                    <div style={{ marginTop: 8, fontSize: 20, fontFamily: "'Cinzel', serif", fontWeight: 600 }}
+                      className={parseFloat(delta) < 0 ? "green" : "red"}>
+                      {parseFloat(delta) < 0 ? "▼" : "▲"} {Math.abs(delta)} lbs from last entry
+                    </div>
+                  )}
+                  <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 14, color: "#9a7840", marginTop: 6 }}>
+                    as of {new Date(latest.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                  </div>
+                </>
+              ) : <div className="empty">No weigh-ins recorded yet → Weight tab</div>}
+            </div>
+
+            {weights.length > 1 && (
+              <div className="card">
+                <span className="lbl">Weight Trend</span>
+                <div style={{ fontSize: 11, color: "#9a7840", fontFamily: "'Special Elite', monospace", marginBottom: 6, opacity: 0.7 }}>
+                  taller bar = more progress
+                </div>
+                <div className="sparkline">
+                  {weights.slice(-8).map((w, i, arr) => {
+                    const vals = arr.map(x => x.weight);
+                    const min = Math.min(...vals), max = Math.max(...vals);
+                    const range = max - min || 1;
+                    const h = Math.round(((max - w.weight) / range) * 48 + 12);
+                    return (
+                      <div key={i} className="spark-col">
+                        <div className="spark-bar" style={{ height: h }} />
+                        <div className="spark-val">{w.weight}</div>
+                        <div className="spark-lbl">
+                          {new Date(w.date + "T12:00:00").toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="card">
+              <span className="lbl">Today's Nutrition</span>
+              {todayDiet ? (
+                <div className="metric-grid" style={{ marginTop: 10 }}>
+                  {[
+                    { val: todayDiet.calories || "—", unit: "KCAL" },
+                    { val: todayDiet.protein ? `${todayDiet.protein}g` : "—", unit: "PROTEIN" },
+                    { val: todayDiet.carbs ? `${todayDiet.carbs}g` : "—", unit: "CARBS" },
+                    { val: todayDiet.water ? `${todayDiet.water} ml` : "—", unit: "WATER" },
+                  ].map((m, i) => (
+                    <div key={i} className="metric-block">
+                      <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 30, color: "#4a2a0a" }}>{m.val || "—"}</div>
+                      <div style={{ fontFamily: "'Cinzel', serif", fontSize: 10, color: "#9a7840", letterSpacing: 2, marginTop: 4 }}>{m.unit}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="empty">Nothing logged today → Diet tab</div>}
+            </div>
+
+            <div className="card">
+              <span className="lbl">Recent Training</span>
+              {recentWorkouts.length ? recentWorkouts.map((w, i) => (
+                <div key={i} className="workout-entry">
+                  <div className="row">
+                    <span className="lift-name">{w.lift}</span>
+                    <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 14, color: "#9a7840" }}>
+                      {new Date(w.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                    </span>
+                  </div>
+                  <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 16, color: "#6a4a28", marginTop: 5 }}>
+                    {w.sets.map((s, j) => <span key={j}>{j > 0 ? " · " : ""}<span style={{ color: "#2a1a08" }}>{s.weight}</span>×{s.reps}</span>)}
+                  </div>
+                </div>
+              )) : <div className="empty">No sessions yet → Train tab</div>}
+            </div>
+
+            {/* ── EXPORT ── */}
+            <div className="card" style={{ marginTop: 8 }}>
+              <span className="lbl">Export Data</span>
+              <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 13, color: "#9a7060", margin: "6px 0 12px" }}>
+                Generate a summary to paste into Claude for analysis and insights.
+              </div>
+              <button className="big-btn" onClick={generateExport}>
+                ⚙ GENERATE EXPORT
+              </button>
+              {showExport && exportText && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span className="lbl" style={{ fontSize: 11 }}>Ready to copy</span>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="ghost-btn" style={{ fontSize: 12, padding: "5px 12px" }}
+                        onClick={() => { navigator.clipboard?.writeText(exportText).catch(() => {}); flash("Copied ✓"); }}>
+                        COPY
+                      </button>
+                      <button className="ghost-btn" style={{ fontSize: 12, padding: "5px 12px", borderColor: "#4080a0", color: "#4080a0" }}
+                        onClick={() => {
+                          const subject = encodeURIComponent("Manifold Health Export — " + new Date().toLocaleDateString("en-CA"));
+                          const body = encodeURIComponent(exportText);
+                          window.location.href = `mailto:?subject=${subject}&body=${body}`;
+                        }}>
+                        EMAIL
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    readOnly
+                    value={exportText}
+                    onFocus={e => e.target.select()}
+                    style={{
+                      width: "100%", height: 200, resize: "vertical",
+                      background: "#1a1008", color: "#c8a060",
+                      fontFamily: "'Special Elite', monospace", fontSize: 11,
+                      lineHeight: 1.6, padding: 12, border: "1px solid #4a3010",
+                      borderRadius: 2, boxSizing: "border-box",
+                    }}
+                  />
+                  <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 12, color: "#9a7060", marginTop: 8, textAlign: "center" }}>
+                    Tap the box to select all, or use Copy All above
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── WEIGHT ── */}
+        {tab === "weight" && (
+          <>
+            <div className="section-head">Weekly Weigh-In</div>
+            <div className="card">
+              <div className="field-group">
+                <span className="lbl">Date</span>
+                <input type="date" value={wDate} onChange={e => setWDate(e.target.value)} />
+              </div>
+              <div className="field-group">
+                <span className="lbl">Weight (lbs)</span>
+                <input type="number" inputMode="decimal" placeholder="236.5" value={wInput}
+                  onChange={e => setWInput(e.target.value)} step="0.5" />
+              </div>
+              <button className="big-btn" onClick={saveWeight}>LOG WEIGHT</button>
+            </div>
+            <div className="card">
+              <span className="lbl">History</span>
+              {weights.length === 0 && <div className="empty">No entries yet</div>}
+              {[...weights].reverse().map((w, i) => (
+                <div key={i} className="history-row">
+                  <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 16, color: "#7a5030" }}>
+                    {new Date(w.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                    <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 32, color: "#1a1008" }}>{w.weight} lbs</div>
+                    <button className="del-btn" onClick={() => deleteWeight(w.date)}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ── DIET ── */}
+        {tab === "diet" && (
+          <>
+            <div className="section-head">Daily Nutrition</div>
+            <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 13, color: "#9a7040", marginBottom: 16, letterSpacing: 1 }}>
+              Target: ~130g Carbs · 155g+ Protein · 2000 Kcal
+            </div>
+            <div className="card">
+              <div className="field-group">
+                <span className="lbl">Date</span>
+                <input type="date" value={dietDate} onChange={e => setDietDate(e.target.value)} />
+              </div>
+              {[
+                { key: "calories", label: "Calories", ph: "1800", mode: "numeric" },
+                { key: "protein", label: "Protein (g)", ph: "155", mode: "numeric" },
+                { key: "carbs", label: "Carbs (g)", ph: "120", mode: "numeric" },
+                { key: "water", label: "Water (ml)", ph: "2500", mode: "numeric" },
+              ].map(f => (
+                <div key={f.key} className="field-group">
+                  <span className="lbl">{f.label}</span>
+                  <input type="number" inputMode={f.mode} placeholder={f.ph}
+                    value={dietForm[f.key]} onChange={e => setDietForm(p => ({ ...p, [f.key]: e.target.value }))} />
+                </div>
+              ))}
+              <div className="field-group">
+                <span className="lbl">Notes</span>
+                <textarea placeholder="How did eating go today?" value={dietForm.notes}
+                  onChange={e => setDietForm(p => ({ ...p, notes: e.target.value }))} />
+              </div>
+              <button className="big-btn" onClick={saveDiet}>RECORD DAY</button>
+            </div>
+            <div className="card">
+              <span className="lbl">Recent Days</span>
+              {Object.keys(diet).length === 0 && <div className="empty">No days recorded yet</div>}
+              {Object.entries(diet).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 14).map(([date, d]) => (
+                <div key={date} style={{ padding: "14px 0", borderBottom: "1px dashed #b09060" }}>
+                  <div className="row" style={{ marginBottom: 8 }}>
+                    <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 600, fontSize: 16, color: "#6a3a10", letterSpacing: 1 }}>
+                      {new Date(date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                    </div>
+                    <button className="del-btn" onClick={() => deleteDiet(date)}>✕</button>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px", fontFamily: "'Special Elite', monospace", fontSize: 16, color: "#6a4a28" }}>
+                    <span>{d.calories || "—"} kcal</span>
+                    <span>{d.protein || "—"}g prot</span>
+                    <span>{d.carbs || "—"}g carbs</span>
+                    <span>{d.water || "—"} ml water</span>
+                  </div>
+                  {d.notes && <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 14, color: "#9a7040", marginTop: 8 }}>{d.notes}</div>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ── FOOD LOG ── */}
+        {tab === "food" && (
+          <>
+            <div className="section-head">Food Log</div>
+
+            {/* ── CALORIE COUNTER BAR ── */}
+            <div style={{
+              background: "linear-gradient(135deg, #2a1a08, #3a2510)",
+              border: "2px solid #a07840", borderRadius: 2,
+              padding: "14px 18px", marginBottom: 14,
+              boxShadow: "2px 2px 8px rgba(80,40,10,0.25)"
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                <span style={{ fontFamily: "'Cinzel', serif", fontSize: 11, letterSpacing: 3, color: "#a07840" }}>TODAY'S CALORIES</span>
+                <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 12, color: "#6a5040" }}>{CAL_TARGET} target</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                <span style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 52, lineHeight: 1, color: todayFoodTotals.calories > CAL_TARGET ? "#c04040" : "#d4a840" }}>
+                  {Math.round(todayFoodTotals.calories)}
+                </span>
+                <span style={{ fontFamily: "'Cinzel', serif", fontSize: 18, color: "#7a5030" }}>kcal</span>
+                <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 14, color: "#6a5040", marginLeft: 4 }}>
+                  {todayFoodTotals.calories <= CAL_TARGET
+                    ? `${CAL_TARGET - Math.round(todayFoodTotals.calories)} remaining`
+                    : `${Math.round(todayFoodTotals.calories) - CAL_TARGET} over`}
+                </span>
+              </div>
+              {/* Progress bar */}
+              <div style={{ height: 6, background: "#1a0e04", borderRadius: 3, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", borderRadius: 3,
+                  width: `${Math.min(100, (todayFoodTotals.calories / CAL_TARGET) * 100)}%`,
+                  background: todayFoodTotals.calories > CAL_TARGET
+                    ? "linear-gradient(90deg, #a03030, #c04040)"
+                    : "linear-gradient(90deg, #a07840, #d4a840)",
+                  transition: "width 0.4s ease",
+                }} />
+              </div>
+              {/* Macro row */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 4, marginTop: 10, textAlign: "center" }}>
+                {[
+                  { val: `${todayFoodTotals.protein.toFixed(0)}g`, unit: "PROT", target: 155 },
+                  { val: `${todayFoodTotals.carbs.toFixed(0)}g`, unit: "CARBS", target: 130 },
+                  { val: `${todayFoodTotals.fat.toFixed(0)}g`, unit: "FAT" },
+                  { val: `${todayFoodTotals.fibre.toFixed(0)}g`, unit: "FIBRE" },
+                ].map((m, i) => (
+                  <div key={i}>
+                    <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 700, fontSize: 16, color: "#c8a060", lineHeight: 1 }}>{m.val}</div>
+                    <div style={{ fontFamily: "'Cinzel', serif", fontSize: 8, color: "#7a5840", letterSpacing: 1.5, marginTop: 2 }}>{m.unit}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── WATER TRACKER ── */}
+            {(() => {
+              const WATER_TARGET = 3000;
+              const consumed = parseFloat(diet[today()]?.water) || 0;
+              const pct = Math.min(100, (consumed / WATER_TARGET) * 100);
+              const remaining = Math.max(0, WATER_TARGET - consumed);
+              return (
+                <div style={{
+                  background: "linear-gradient(135deg, #1a2a3a, #0e1e2e)",
+                  border: "2px solid #4080a0", borderRadius: 2,
+                  padding: "14px 18px", marginBottom: 14,
+                  boxShadow: "2px 2px 8px rgba(10,40,80,0.25)"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                    <span style={{ fontFamily: "'Cinzel', serif", fontSize: 11, letterSpacing: 3, color: "#6090b0" }}>WATER</span>
+                    <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 12, color: "#405060" }}>{WATER_TARGET} ml target</span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 44, lineHeight: 1, color: consumed >= WATER_TARGET ? "#40c080" : "#60b0d0" }}>
+                      {Math.round(consumed)}
+                    </span>
+                    <span style={{ fontFamily: "'Cinzel', serif", fontSize: 16, color: "#4a6070" }}>ml</span>
+                    <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 13, color: "#405060", marginLeft: 4 }}>
+                      {consumed >= WATER_TARGET ? "✓ target hit" : `${remaining} ml to go`}
+                    </span>
+                  </div>
+                  {/* Progress bar */}
+                  <div style={{ height: 6, background: "#0a1520", borderRadius: 3, overflow: "hidden", marginBottom: 14 }}>
+                    <div style={{
+                      height: "100%", borderRadius: 3,
+                      width: `${pct}%`,
+                      background: consumed >= WATER_TARGET
+                        ? "linear-gradient(90deg, #208050, #40c080)"
+                        : "linear-gradient(90deg, #2060a0, #60b0d0)",
+                      transition: "width 0.4s ease",
+                    }} />
+                  </div>
+                  {/* Quick-tap buttons */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 10 }}>
+                    {[150, 250, 330, 500].map(ml => (
+                      <button key={ml} onClick={() => addWater(ml)}
+                        style={{
+                          background: "linear-gradient(135deg, #1a3a5a, #0e2a40)",
+                          border: "1px solid #4080a0", borderRadius: 2,
+                          padding: "10px 4px", cursor: "pointer",
+                          fontFamily: "'Cinzel', serif", fontWeight: 700,
+                          fontSize: 13, color: "#80c0e0",
+                          textAlign: "center", lineHeight: 1.2,
+                        }}>
+                        +{ml}<br />
+                        <span style={{ fontSize: 9, color: "#4a7090", letterSpacing: 1 }}>ML</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <button onClick={() => addWater(750)}
+                      style={{
+                        background: "linear-gradient(135deg, #1a3a5a, #0e2a40)",
+                        border: "1px solid #4080a0", borderRadius: 2,
+                        padding: "10px", cursor: "pointer",
+                        fontFamily: "'Cinzel', serif", fontWeight: 700,
+                        fontSize: 13, color: "#80c0e0",
+                      }}>+750 ml</button>
+                    <button onClick={() => addWater(1000)}
+                      style={{
+                        background: "linear-gradient(135deg, #1a3a5a, #0e2a40)",
+                        border: "1px solid #4080a0", borderRadius: 2,
+                        padding: "10px", cursor: "pointer",
+                        fontFamily: "'Cinzel', serif", fontWeight: 700,
+                        fontSize: 13, color: "#80c0e0",
+                      }}>+1000 ml</button>
+                  </div>
+                  <button onClick={resetWater}
+                    style={{
+                      width: "100%", marginTop: 8,
+                      background: "transparent", border: "1px solid #2a4050",
+                      borderRadius: 2, padding: "7px",
+                      fontFamily: "'Cinzel', serif", fontSize: 10,
+                      letterSpacing: 2, color: "#304050", cursor: "pointer",
+                    }}>RESET DAY</button>
+                </div>
+              );
+            })()}
+
+            {/* ── STEP 1: Name + Amount ── */}
+            {foodStep === "name" && (
+              <div className="card">
+                {/* Quick-pick from DB */}
+                {foodDb.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <button className="ghost-btn" style={{ width: "100%", marginBottom: showFoodDb ? 10 : 0, fontSize: 14, padding: "10px" }}
+                      onClick={() => { setShowFoodDb(v => !v); setFoodDbSearch(""); }}>
+                      {showFoodDb ? "▲ HIDE MY FOODS" : `▼ MY FOODS (${foodDb.length})`}
+                    </button>
+                    {showFoodDb && (
+                      <div>
+                        <input type="text" placeholder="Search your foods…"
+                          value={foodDbSearch} onChange={e => setFoodDbSearch(e.target.value)}
+                          style={{ marginBottom: 8 }} />
+                        <div style={{ maxHeight: 220, overflowY: "auto" }}>
+                          {filteredDb.slice(0, 20).map((f, i) => (
+                            <button key={i} onClick={() => loadFromDb(f)}
+                              style={{
+                                width: "100%", background: "#cfc098", border: "1px solid #b09060",
+                                borderRadius: 2, padding: "10px 12px", marginBottom: 6,
+                                cursor: "pointer", textAlign: "left", display: "flex",
+                                justifyContent: "space-between", alignItems: "center",
+                              }}>
+                              <div>
+                                <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 700, fontSize: 14, color: "#3a1a08" }}>{f.name}</div>
+                                <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 12, color: "#9a7040", marginTop: 2 }}>
+                                  per {f.unit || "serving"} · {f.calsPerUnit || f.calories || 0} kcal · {f.proteinPerUnit || f.protein || 0}g P · {f.carbsPerUnit || f.carbs || 0}g C
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                                <span style={{ fontFamily: "'Cinzel', serif", fontSize: 9, color: "#a07840", letterSpacing: 1 }}>×{f.useCount || 1}</span>
+                                <button className="del-btn" style={{ fontSize: 11, padding: "2px 7px" }}
+                                  onClick={ev => { ev.stopPropagation(); deleteFoodDbEntry(f.name); }}>✕</button>
+                              </div>
+                            </button>
+                          ))}
+                          {filteredDb.length === 0 && <div className="empty">No matches</div>}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="field-group" style={{ position: "relative" }}>
+                  <span className="lbl">What did you eat?</span>
+                  <input type="text" placeholder="e.g. Turkey chilli"
+                    value={foodName}
+                    onChange={e => { setFoodName(e.target.value); setShowFoodDb(false); }}
+                    onKeyDown={e => e.key === "Enter" && foodName.trim() && startFoodEntry()} />
+                  {/* Autocomplete dropdown */}
+                  {foodName.trim().length > 0 && (() => {
+                    const matches = foodDb.filter(f =>
+                      f.name.toLowerCase().includes(foodName.toLowerCase()) &&
+                      f.name.toLowerCase() !== foodName.toLowerCase()
+                    ).slice(0, 5);
+                    if (!matches.length) return null;
+                    return (
+                      <div style={{
+                        position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100,
+                        background: "#d8c898", border: "1px solid #a07840",
+                        borderTop: "none", borderRadius: "0 0 2px 2px",
+                        boxShadow: "0 4px 12px rgba(60,30,0,0.2)",
+                      }}>
+                        {matches.map((f, i) => (
+                          <button key={i}
+                            onClick={() => loadFromDb(f)}
+                            style={{
+                              width: "100%", background: i % 2 === 0 ? "#d8c898" : "#cfc090",
+                              border: "none", borderBottom: "1px solid #b09860",
+                              padding: "10px 14px", cursor: "pointer", textAlign: "left",
+                              display: "flex", justifyContent: "space-between", alignItems: "center",
+                            }}>
+                            <div>
+                              <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 700, fontSize: 14, color: "#3a1a08" }}>{f.name}</div>
+                              <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 11, color: "#9a7040", marginTop: 1 }}>
+                                {f.calsPerUnit || f.calories || 0} kcal · {f.proteinPerUnit || f.protein || 0}g P · {f.carbsPerUnit || f.carbs || 0}g C · per {f.unit || "serving"}
+                              </div>
+                            </div>
+                            <span style={{ fontFamily: "'Cinzel', serif", fontSize: 9, color: "#a07840", letterSpacing: 1, marginLeft: 8 }}>×{f.useCount || 1}</span>
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <div className="field-group">
+                    <span className="lbl">Amount</span>
+                    <input type="number" inputMode="decimal" placeholder="1"
+                      value={foodAmt} onChange={e => setFoodAmt(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && foodName.trim() && startFoodEntry()} />
+                  </div>
+                  <div className="field-group">
+                    <span className="lbl">Unit</span>
+                    <input type="text" placeholder="cup, g, oz…"
+                      value={foodUnit} onChange={e => setFoodUnit(e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && foodName.trim() && startFoodEntry()} />
+                  </div>
+                </div>
+                <button className="big-btn" onClick={startFoodEntry} disabled={!foodName.trim()}>
+                  NEXT → ENTER MACROS
+                </button>
+              </div>
+            )}
+
+            {/* ── STEP 2: Macro entry ── */}
+            {foodStep === "macros" && (
+              <div className="card">
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 20, color: "#3a1a08" }}>{foodName}</div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 5, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 15, color: "#5a3010", fontWeight: "bold" }}>
+                      {parseFloat(foodAmt) || 1} {foodUnit || "serving"}
+                    </span>
+                    <span style={{ fontFamily: "'Cinzel', serif", fontSize: 10, letterSpacing: 2, color: "#a07840", border: "1px solid #a07840", padding: "2px 7px", borderRadius: 2 }}>{foodTime}</span>
+                  </div>
+                  <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 12, color: "#9a7060", marginTop: 4 }}>
+                    Enter macros per 1 {foodUnit || "serving"} — amount scales automatically
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                  {[
+                    { key: "carbs",   label: "Carbs (g)",   ph: "18" },
+                    { key: "protein", label: "Protein (g)", ph: "22" },
+                    { key: "fat",     label: "Fat (g)",     ph: "6"  },
+                    { key: "fibre",   label: "Fibre (g)",   ph: "4"  },
+                  ].map(f => (
+                    <div key={f.key}>
+                      <span className="lbl">{f.label}</span>
+                      <input type="number" inputMode="decimal" placeholder={f.ph}
+                        value={foodMacros[f.key]}
+                        onChange={e => setFoodMacros(p => ({ ...p, [f.key]: e.target.value }))} />
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{
+                  background: "#cfc098", border: "1px solid #a07840", borderRadius: 2,
+                  padding: "12px 16px", marginBottom: 14
+                }}>
+                  {(() => {
+                    const mult = parseFloat(foodAmt) || 1;
+                    const perUnit = calcCals(foodMacros, 1);
+                    const scaled = calcCals(foodMacros, mult);
+                    return (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, marginBottom: 8 }}>
+                          <div style={{ textAlign: "center", borderRight: "1px solid #b09060", paddingRight: 8 }}>
+                            <div style={{ fontFamily: "'Cinzel', serif", fontSize: 9, color: "#7a5030", letterSpacing: 2, marginBottom: 2 }}>PER {(foodUnit || "SERVING").toUpperCase()}</div>
+                            <span style={{ fontFamily: "'Cinzel', serif", fontWeight: 700, fontSize: 22, color: "#6a4020" }}>{perUnit}</span>
+                            <span style={{ fontFamily: "'Cinzel', serif", fontSize: 11, color: "#9a7040" }}> kcal</span>
+                          </div>
+                          <div style={{ textAlign: "center", paddingLeft: 8 }}>
+                            <div style={{ fontFamily: "'Cinzel', serif", fontSize: 9, color: "#7a5030", letterSpacing: 2, marginBottom: 2 }}>× {mult} = THIS ITEM</div>
+                            <span style={{ fontFamily: "'Cinzel', serif", fontWeight: 800, fontSize: 22, color: "#3a1a08" }}>{scaled}</span>
+                            <span style={{ fontFamily: "'Cinzel', serif", fontSize: 11, color: "#9a7040" }}> kcal</span>
+                          </div>
+                        </div>
+                        <div style={{ height: 1, background: "#b09060", margin: "8px 0" }} />
+                        <div style={{ fontFamily: "'Cinzel', serif", fontSize: 11, color: "#7a5030", textAlign: "center", letterSpacing: 1 }}>
+                          + {Math.round(todayFoodTotals.calories)} logged = <strong style={{ color: "#4a2a0a", fontSize: 14 }}>{Math.round(todayFoodTotals.calories) + scaled}</strong> kcal today
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                <button className="big-btn" onClick={saveFoodEntry}>LOG THIS ITEM</button>
+                <button className="ghost-btn" style={{ width: "100%", marginTop: 10 }}
+                  onClick={() => setFoodStep("name")}>← BACK</button>
+              </div>
+            )}
+
+            {/* ── Today's entries ── */}
+            {todayFoodLog.length > 0 && (
+              <div className="card">
+                <span className="lbl">Today's Entries</span>
+                {todayFoodLog.map((e) => (
+                  <div key={e.id} style={{ paddingTop: 14, paddingBottom: 14, borderBottom: "1px dashed #b09060" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontFamily: "'Cinzel', serif", fontWeight: 700, fontSize: 17, color: "#3a1a08" }}>{e.name}</div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3 }}>
+                          <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 13, color: "#9a7040" }}>{e.amount} {e.unit || ""}</span>
+                          <span style={{ fontFamily: "'Cinzel', serif", fontSize: 9, letterSpacing: 1.5, color: "#a07840", border: "1px solid #c0a060", padding: "2px 6px", borderRadius: 2 }}>{e.time}</span>
+                        </div>
+                        <div className="macro-pills" style={{ marginTop: 7 }}>
+                          <span className="macro-pill" style={{ background: "#c8b080", borderColor: "#8a6020" }}>{e.calories} kcal</span>
+                          {e.protein ? <span className="macro-pill">{e.protein}g P</span> : <span className="macro-pill" style={{ color: "#b09060", borderColor: "#c8b480" }}>—P</span>}
+                          {e.carbs   ? <span className="macro-pill">{e.carbs}g C</span>   : <span className="macro-pill" style={{ color: "#b09060", borderColor: "#c8b480" }}>—C</span>}
+                          {e.fat     ? <span className="macro-pill">{e.fat}g F</span>     : null}
+                          {e.fibre   ? <span className="macro-pill">{e.fibre}g Fi</span>  : null}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginLeft: 10, marginTop: 2 }}>
+                        <button className="ghost-btn" style={{ padding: "5px 12px", fontSize: 13 }}
+                          onClick={() => editingId === e.id ? setEditingId(null) : startEditEntry(e)}>
+                          {editingId === e.id ? "✕" : "edit"}
+                        </button>
+                        <button className="del-btn" onClick={() => deleteFoodEntry(e.id)}>✕</button>
+                      </div>
+                    </div>
+
+                    {/* Inline edit form */}
+                    {editingId === e.id && (
+                      <div style={{ marginTop: 14, background: "#cfc098", border: "1px solid #a07840", borderRadius: 2, padding: 14 }}>
+                        {/* Name, amount, time */}
+                        <div style={{ marginBottom: 12 }}>
+                          <span className="lbl" style={{ fontSize: 10 }}>Food Name</span>
+                          <input type="text" value={editingName}
+                            onChange={ev => setEditingName(ev.target.value)}
+                            style={{ marginBottom: 10 }} />
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                            <div>
+                              <span className="lbl" style={{ fontSize: 10 }}>Amount</span>
+                              <input type="number" inputMode="decimal" value={editingAmt}
+                                onChange={ev => setEditingAmt(ev.target.value)} />
+                            </div>
+                            <div>
+                              <span className="lbl" style={{ fontSize: 10 }}>Unit</span>
+                              <input type="text" placeholder="cup, g, oz…" value={editingUnit}
+                                onChange={ev => setEditingUnit(ev.target.value)} />
+                            </div>
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 10 }}>
+                            <div>
+                              <span className="lbl" style={{ fontSize: 10 }}>Time</span>
+                              <input type="text" placeholder="e.g. 9:30 AM" value={editingTime}
+                                onChange={ev => setEditingTime(ev.target.value)} />
+                            </div>
+                          </div>
+                        </div>
+                        {/* Macros */}
+                        <div style={{ height: 1, background: "#b09060", margin: "12px 0" }} />
+                        <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 12, color: "#9a7060", marginBottom: 8 }}>
+                          Macros per 1 {editingUnit || "serving"} — scaled × {parseFloat(editingAmt) || 1}
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                          {[
+                            { key: "carbs",   label: "Carbs (g)"   },
+                            { key: "protein", label: "Protein (g)" },
+                            { key: "fat",     label: "Fat (g)"     },
+                            { key: "fibre",   label: "Fibre (g)"   },
+                          ].map(f => (
+                            <div key={f.key}>
+                              <span className="lbl" style={{ fontSize: 10 }}>{f.label}</span>
+                              <input type="number" inputMode="decimal" placeholder="0"
+                                value={foodMacros[f.key]}
+                                onChange={ev => setFoodMacros(p => ({ ...p, [f.key]: ev.target.value }))} />
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ textAlign: "center", marginBottom: 10, fontFamily: "'Cinzel', serif", fontSize: 14, color: "#4a2a0a" }}>
+                          {calcCals(foodMacros, 1)} kcal × {parseFloat(editingAmt) || 1} = <strong style={{ fontSize: 18 }}>{calcCals(foodMacros, parseFloat(editingAmt) || 1)} kcal</strong>
+                        </div>
+                        <button className="big-btn" style={{ marginTop: 0 }} onClick={saveEditEntry}>SAVE CHANGES</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+                {/* ── TRAINING ── */}
+        {tab === "training" && (
+          <>
+            <div className="section-head">Training Log</div>
+            <div className="card">
+              <div className="field-group">
+                <span className="lbl">Date</span>
+                <input type="date" value={wkDate} onChange={e => setWkDate(e.target.value)} />
+              </div>
+              <span className="lbl">Lift</span>
+              <div className="lift-selector">
+                {LIFT_SHORT.map((l, i) => (
+                  <button key={i} className={`lift-choice${wkLift === i ? " selected" : ""}`} onClick={() => setWkLift(i)}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+              <span className="lbl">Sets</span>
+              {wkSets.map((s, i) => (
+                <div key={i} className="set-row">
+                  <div>
+                    <span className="lbl">Weight</span>
+                    <input type="number" inputMode="decimal" placeholder="185" value={s.weight}
+                      onChange={e => { const sets = [...wkSets]; sets[i] = { ...sets[i], weight: e.target.value }; setWkSets(sets); }} />
+                  </div>
+                  <div>
+                    <span className="lbl">Reps</span>
+                    <input type="number" inputMode="numeric" placeholder="5" value={s.reps}
+                      onChange={e => { const sets = [...wkSets]; sets[i] = { ...sets[i], reps: e.target.value }; setWkSets(sets); }} />
+                  </div>
+                  <button className="rm-btn" onClick={() => setWkSets(prev => prev.filter((_, idx) => idx !== i))}>✕</button>
+                </div>
+              ))}
+              <button className="ghost-btn" style={{ width: "100%", marginBottom: 18 }}
+                onClick={() => setWkSets(prev => [...prev, { weight: "", reps: "" }])}>
+                ⊕ Add Set
+              </button>
+              <div className="field-group">
+                <span className="lbl">Notes</span>
+                <textarea placeholder="How did it feel? PRs? Adjustments?" value={wkNotes}
+                  onChange={e => setWkNotes(e.target.value)} />
+              </div>
+              <button className="big-btn" onClick={saveWorkout}>RECORD SESSION</button>
+            </div>
+            <div className="card">
+              <span className="lbl">Session History</span>
+              {workouts.length === 0 && <div className="empty">No sessions recorded yet</div>}
+              {[...workouts].reverse().map((w, i) => (
+                <div key={i} className="workout-entry">
+                  <div className="row">
+                    <span className="lift-name">{w.lift}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontFamily: "'Special Elite', monospace", fontSize: 14, color: "#9a7040" }}>
+                        {new Date(w.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                      </span>
+                      <button className="del-btn" onClick={() => deleteWorkout(i)}>✕</button>
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: "'Special Elite', monospace", fontSize: 17, color: "#6a4a28", marginTop: 5 }}>
+                    {w.sets.map((s, j) => <span key={j}>{j > 0 ? " · " : ""}<span style={{ color: "#2a1a08" }}>{s.weight}</span>×{s.reps}</span>)}
+                  </div>
+                  {w.notes && <div style={{ fontFamily: "'IM Fell English', serif", fontStyle: "italic", fontSize: 14, color: "#9a7040", marginTop: 6 }}>{w.notes}</div>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+      </div>
+
+      {/* BOTTOM NAV */}
+      <div className="bottom-nav">
+        {tabs.map(t => (
+          <button key={t.id} className={`nav-item${tab === t.id ? " active" : ""}`} onClick={() => setTab(t.id)}>
+            <span className="nav-icon">{t.icon}</span>
+            <span className="nav-label">{t.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+
+  <script>
+    // Register service worker for offline use
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        // Inline service worker via blob URL
+        const swCode = `
+          const CACHE = 'manifold-v1';
+          const ASSETS = [location.href];
+          self.addEventListener('install', e => {
+            e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+          });
+          self.addEventListener('fetch', e => {
+            e.respondWith(
+              caches.match(e.request).then(r => r || fetch(e.request))
+            );
+          });
+        `;
+        const blob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(swUrl).catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
